@@ -1,0 +1,158 @@
+name: Publish
+# Adds a Build run's RPMs to the dnf repository served from the gh-pages
+# branch, and regenerates the metadata over everything the repository holds.
+#
+# Nothing is ever removed. Every build that has been published stays
+# published, so a host can go back to an earlier one (`dnf install
+# spamassassin-4.0.2-3`) while waiting on a fix, instead of being stuck on
+# whatever is newest.
+#
+# Publish a build:
+#   gh workflow run Publish -f run_id=<the Build run whose RPMs to publish>
+
+on:
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build run ID whose RPMs to publish'
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+# gh-pages is a single mutable store, so two publishes must not interleave.
+concurrency: publish
+
+jobs:
+  # A workflow_run from Verify with no verified-build marker means Watch
+  # found nothing new that day, and Verify's jobs skipped end to end.
+  resolve:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      proceed: ${{ steps.resolve.outputs.proceed }}
+    steps:
+      - if: github.event_name == 'workflow_run'
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: verified-build
+          path: verified-build
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            echo "run_id=${{ inputs.run_id }}" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.download.outcome }}" = 'success' ]; then
+            . verified-build/verified-build.env
+            echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Verify did not leave a verified build to publish"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  publish:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          path: src
+
+      # gh-pages holds the published repository: the RPMs themselves and their
+      # metadata. It is a store rather than a build output, so this starts from
+      # what is already there and adds to it.
+      - name: Check out the published repository
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          if git ls-remote --exit-code --heads "$url" gh-pages >/dev/null; then
+            git clone -q --branch gh-pages --single-branch "$url" site
+          else
+            mkdir site
+            git -C site init -q -b gh-pages
+            git -C site remote add origin "$url"
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpms-x86_64
+          path: incoming/x86_64
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpms-aarch64
+          path: incoming/aarch64
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # An already-published filename is never replaced. Two builds of the same
+      # upstream release carry the same EVR and therefore the same filename;
+      # the copy that is already public is the one that stays, because
+      # replacing it would change an artifact under hosts that already have it.
+      - name: Add the new RPMs
+        id: add
+        run: |
+          new=0
+          for arch in x86_64 aarch64; do
+            mkdir -p "site/al2023/$arch"
+            for f in "incoming/$arch"/*.rpm; do
+              dest="site/al2023/$arch/$(basename "$f")"
+              if [ -e "$dest" ]; then
+                echo "already published: $(basename "$f")"
+              else
+                cp "$f" "$dest"
+                new=$((new + 1))
+              fi
+            done
+          done
+          cp src/spamassassin-al2023.repo site/
+          # Otherwise Pages runs Jekyll over the branch, which has no business
+          # touching a package tree.
+          touch site/.nojekyll
+          echo "added $new package(s)"
+          echo "new=$new" >> "$GITHUB_OUTPUT"
+
+      # createrepo_c out of AL2023 itself, the distribution these packages
+      # install on. --update reuses the metadata of packages already there, so
+      # a publish costs only the packages it adds.
+      #
+      # Runs only when packages were actually added: createrepo_c stamps its
+      # output, so running it regardless would rewrite every metadata file on
+      # every run and commit that churn even when nothing changed.
+      - name: Rebuild the repository metadata
+        if: steps.add.outputs.new != '0'
+        run: |
+          docker run --rm -v "$PWD/site:/site" -w /site \
+            public.ecr.aws/amazonlinux/amazonlinux:2023 \
+            bash -c 'dnf -y -q install createrepo_c &&
+              for a in x86_64 aarch64; do createrepo_c --update "al2023/$a"; done'
+          # The container wrote as root; git runs as the runner user.
+          sudo chown -R "$(id -u):$(id -g)" site
+
+      - name: Publish
+        run: |
+          cd site
+          git add -A
+          git -c user.name='github-actions[bot]' \
+              -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+              commit -q -m "Publish RPMs from build ${{ needs.resolve.outputs.run_id }}" \
+            || { echo "nothing new to publish"; exit 0; }
+          git push -q origin gh-pages

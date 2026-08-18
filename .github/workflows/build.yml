@@ -1,0 +1,85 @@
+name: Build
+
+on:
+  workflow_run:
+    workflows: [Watch]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'SpamAssassin version, e.g. 4.0.2'
+        required: true
+      release:
+        description: 'Fedora spec release, e.g. 3'
+        required: true
+        default: '3'
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  # workflow_dispatch carries version/release directly; a workflow_run from
+  # Watch only carries its run id, so this downloads Watch's marker artifact
+  # instead. No marker means Watch had nothing new, and build is skipped.
+  resolve:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.resolve.outputs.version }}
+      release: ${{ steps.resolve.outputs.release }}
+      proceed: ${{ steps.resolve.outputs.proceed }}
+    steps:
+      - if: github.event_name == 'workflow_run'
+        id: download
+        continue-on-error: true
+        uses: actions/download-artifact@v8
+        with:
+          name: new-release
+          path: new-release
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            {
+              echo "version=${{ inputs.version }}"
+              echo "release=${{ inputs.release }}"
+              echo "proceed=true"
+            } >> "$GITHUB_OUTPUT"
+          elif [ "${{ steps.download.outcome }}" = 'success' ]; then
+            . new-release/new-release.env
+            {
+              echo "version=$version"
+              echo "release=$release"
+              echo "proceed=true"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "Watch did not leave a new release to build"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          docker run --rm -v "$PWD:/w" -w /w \
+            public.ecr.aws/amazonlinux/amazonlinux:2023 \
+            ./build/build.sh '${{ needs.resolve.outputs.version }}' '${{ needs.resolve.outputs.release }}'
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rpms-${{ matrix.arch }}
+          path: out/RPMS/

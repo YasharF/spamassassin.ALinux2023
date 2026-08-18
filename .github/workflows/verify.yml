@@ -1,0 +1,136 @@
+name: Verify
+# Installs the RPMs a Build run produced, pairs them with spamass-milter from
+# SPAL, wires both into Postfix, and checks that real mail gets scored.
+
+on:
+  workflow_run:
+    workflows: [Build]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: 'Build run ID whose RPMs to test'
+        required: true
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  # Build's own resolve job can succeed with its build job skipped (Watch
+  # found nothing new), so this checks for rpms-* artifacts rather than
+  # trusting Build's conclusion alone.
+  resolve:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    outputs:
+      run_id: ${{ steps.resolve.outputs.run_id }}
+      proceed: ${{ steps.resolve.outputs.proceed }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = 'workflow_dispatch' ]; then
+            run_id='${{ inputs.run_id }}'
+          else
+            run_id='${{ github.event.workflow_run.id }}'
+          fi
+          echo "run_id=$run_id" >> "$GITHUB_OUTPUT"
+          n=$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" \
+                --jq '[.artifacts[].name | select(startswith("rpms-"))] | length')
+          if [ "$n" -gt 0 ]; then
+            echo "proceed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Build run $run_id produced no rpms-* artifacts to verify"
+            echo "proceed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  verify:
+    needs: resolve
+    if: needs.resolve.outputs.proceed == 'true'
+    # Both matrix legs resolve the same Build run; the signal job needs it.
+    outputs:
+      run_id: ${{ needs.resolve.outputs.run_id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: rpms-${{ matrix.arch }}
+          path: rpms
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ github.token }}
+
+      - name: Install the RPMs, pair with SPAL's spamass-milter, and start Postfix
+        run: |
+          docker run -d --name spamassassin --network host \
+            -v "$PWD:/w" -w /w \
+            public.ecr.aws/amazonlinux/amazonlinux:2023 \
+            ./verify/run.sh /w/rpms
+          for i in $(seq 1 90); do
+            (exec 3<>/dev/tcp/127.0.0.1/25) 2>/dev/null && break
+            if [ "$i" = 90 ]; then
+              docker logs spamassassin
+              echo "postfix never listened on 127.0.0.1:25"
+              exit 1
+            fi
+            sleep 2
+          done
+          docker logs spamassassin
+
+      - name: Ham passes through Postfix -> milter -> spamd
+        run: docker exec spamassassin python3 /w/verify/smtp-check.py accept /w/verify/ham-mail.eml
+
+      - name: GTUBE is rejected by Postfix -> milter -> spamd
+        run: docker exec spamassassin python3 /w/verify/smtp-check.py reject /w/verify/gtube-mail.eml
+
+      # Direct spamd checks, bypassing Postfix and the milter, so a failure
+      # in either check above can be told apart from a failure in spamd or
+      # the rules themselves.
+      - name: spamd itself scores ham and GTUBE correctly
+        run: |
+          docker exec -i spamassassin spamc < verify/ham-mail.eml | grep '^X-Spam-Status: No'
+          docker exec -i spamassassin spamc < verify/gtube-mail.eml | grep '^X-Spam-Status: Yes'
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          echo "=== spamd, spamass-milter, postfix processes ==="
+          docker exec spamassassin ps -eo pid,stat,etime,args || true
+          echo "=== postfix mail log ==="
+          docker exec spamassassin sh -c 'cat /var/log/maillog 2>/dev/null || journalctl -u postfix --no-pager 2>/dev/null' || true
+          echo "=== postfix configuration (non-default) ==="
+          docker exec spamassassin postconf -n || true
+
+      - name: Package and container log
+        if: always()
+        run: |
+          docker exec spamassassin rpm -qa 'spamassassin*' 'spamass-milter*' postfix || true
+          docker logs spamassassin
+
+  # `needs` waits for both architectures, so nothing is signalled unless both
+  # verified. Publish is add-only and skips filenames already there, so a
+  # re-run against an already-published build is a no-op rather than
+  # something to guard against.
+  signal:
+    needs: verify
+    runs-on: ubuntu-24.04
+    steps:
+      - run: |
+          echo "run_id=${{ needs.verify.outputs.run_id }}" >> verified-build.env
+          cat verified-build.env
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: verified-build
+          path: verified-build.env

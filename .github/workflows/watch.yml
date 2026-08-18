@@ -1,0 +1,96 @@
+name: Watch
+# Checks Fedora's spamassassin spec (rawhide -- the only branch that carries
+# it; there is no epel9 branch and EPEL 9's own repo carries no spamassassin
+# package either) for a version-release this repository hasn't published yet,
+# and leaves a marker for Build to pick up when it finds one. Build, Verify,
+# and Publish each listen for the previous workflow's completion rather than
+# being dispatched, so an upstream spec bump reaches the dnf repository, and
+# from there a consumer's `dnf upgrade`, with nobody touching it.
+#
+# rawhide carries only the current spec, so "new" means "not in the published
+# repository" rather than "newer than the last one seen". There is no state
+# to keep and no cursor to get wrong: the published repository is the record
+# of what has been built, and a re-run of this workflow cannot publish
+# anything twice.
+
+on:
+  schedule:
+    # Daily. SpamAssassin releases a handful of times a year, so this is
+    # about bounding how long a release sits unnoticed, not catching it fast.
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+jobs:
+  watch:
+    runs-on: ubuntu-24.04
+    steps:
+      # A Build takes a while and Verify longer; a daily schedule can't
+      # collide with itself, but a manual run during a build can, and would
+      # start a second build of the same release.
+      - name: Skip if a Build is already running
+        id: inflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          n=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=build.yml \
+                --status=in_progress --json databaseId --jq 'length')
+          q=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=build.yml \
+                --status=queued --json databaseId --jq 'length')
+          if [ "$((n + q))" -gt 0 ]; then
+            echo "a Build is already in flight; nothing to do"
+            echo "busy=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "busy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Newest upstream spec
+        id: upstream
+        if: steps.inflight.outputs.busy == 'false'
+        run: |
+          set -euo pipefail
+          spec=$(curl -fsSL https://src.fedoraproject.org/rpms/spamassassin/raw/rawhide/f/spamassassin.spec)
+          v=$(printf '%s\n' "$spec" | sed -n 's/^Version:[[:space:]]*//p')
+          r=$(printf '%s\n' "$spec" | sed -n 's/^Release:[[:space:]]*\([0-9]\{1,\}\).*/\1/p')
+          [ -n "$v" ] && [ -n "$r" ] || { echo "could not parse Version/Release from the spec"; exit 1; }
+          echo "upstream release: $v-$r"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "release=$r" >> "$GITHUB_OUTPUT"
+
+      # The gh-pages branch rather than the Pages URL: the branch is what a
+      # publish writes and is true the moment it lands, where the served site
+      # sits behind a CDN and can lag.
+      - name: Skip if it is already published
+        id: published
+        if: steps.inflight.outputs.busy == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.upstream.outputs.version }}
+          R: ${{ steps.upstream.outputs.release }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/contents/al2023/x86_64/spamassassin-$V-$R.x86_64.rpm?ref=gh-pages" \
+               --silent >/dev/null 2>&1; then
+            echo "$V-$R is already in the published repository"
+            echo "new=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "$V-$R is not published yet"
+            echo "new=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Build listens for this workflow's completion instead of being
+      # dispatched: a run started by GITHUB_TOKEN can't itself trigger another
+      # workflow's on.workflow_run listener.
+      - name: Leave a marker for Build
+        if: steps.inflight.outputs.busy == 'false' && steps.published.outputs.new == 'true'
+        run: |
+          echo "version=${{ steps.upstream.outputs.version }}" >> new-release.env
+          echo "release=${{ steps.upstream.outputs.release }}" >> new-release.env
+          cat new-release.env
+
+      - uses: actions/upload-artifact@v7
+        if: steps.inflight.outputs.busy == 'false' && steps.published.outputs.new == 'true'
+        with:
+          name: new-release
+          path: new-release.env
