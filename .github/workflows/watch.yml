@@ -70,8 +70,13 @@ jobs:
           V: ${{ steps.upstream.outputs.version }}
           R: ${{ steps.upstream.outputs.release }}
         run: |
-          if gh api "repos/$GITHUB_REPOSITORY/contents/al2023/x86_64/spamassassin-$V-$R.x86_64.rpm?ref=gh-pages" \
-               --silent >/dev/null 2>&1; then
+          # The built RPM's release carries AL2023's own dist suffix
+          # (spamassassin-4.0.2-5.amzn2023.x86_64.rpm, not
+          # spamassassin-4.0.2-5.x86_64.rpm), so this lists the directory and
+          # matches by prefix instead of assuming an exact filename.
+          names=$(gh api "repos/$GITHUB_REPOSITORY/contents/al2023/x86_64?ref=gh-pages" \
+                    --jq '.[].name' 2>/dev/null || true)
+          if printf '%s\n' "$names" | grep -qE "^spamassassin-$V-$R(\.[^-]+)?\.x86_64\.rpm\$"; then
             echo "$V-$R is already in the published repository"
             echo "new=false" >> "$GITHUB_OUTPUT"
           else

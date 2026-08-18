@@ -4,7 +4,7 @@ name: Publish
 #
 # Nothing is ever removed. Every build that has been published stays
 # published, so a host can go back to an earlier one (`dnf install
-# spamassassin-4.0.2-3`) while waiting on a fix, instead of being stuck on
+# spamassassin-4.0.2-5.amzn2023`) while waiting on a fix, instead of being stuck on
 # whatever is newest.
 #
 # Publish a build:

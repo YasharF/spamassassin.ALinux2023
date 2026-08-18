@@ -17,7 +17,7 @@ The `spamassassin-al2023` packages are unsigned, so the repository sets `gpgchec
 
 New versions are likely to show up here within a day of a spec bump in Fedora's `spamassassin` dist-git, via the GitHub Action workflow in this repo. `dnf upgrade` picks them up when they do.
 
-Every published build stays published. `dnf list --showduplicates spamassassin` shows what's available, and you can install a specific version by name, e.g. `dnf install spamassassin-4.0.2-3`.
+Every published build stays published. `dnf list --showduplicates spamassassin` shows what's available, and you can install a specific version by name, e.g. `dnf install spamassassin-4.0.2-5.amzn2023`.
 
 ## How it works
 
@@ -33,7 +33,7 @@ GitHub Actions handles the whole process, chained end-to-end:
 [`build/build.sh`](build/build.sh) is the whole build, and runs in a docker container:
 
 ```sh
-docker run --rm -v "$PWD:/w" -w /w public.ecr.aws/amazonlinux/amazonlinux:2023 ./build/build.sh 4.0.2 3
+docker run --rm -v "$PWD:/w" -w /w public.ecr.aws/amazonlinux/amazonlinux:2023 ./build/build.sh 4.0.2 5
 ```
 
 RPMs land in `out/RPMS`.
@@ -46,11 +46,12 @@ There's no vendor SRPM to pull for SpamAssassin the way the dovecot repo pulls o
 
 ### Changes to Fedora's spec
 
-The SpamAssassin sources themselves are not touched. Three things needed changing to build Fedora's spec on AL2023:
+The SpamAssassin sources themselves are not touched, and the spec's actual content is only patched in one place (the `%patch` rewrite below). Everything else is a build-environment adjustment, not a spec edit:
 
 - **`--define "rhel 9"`** -- the spec already special-cases RHEL-family builds to skip two optional dependencies it can't resolve there: `perl-Net-Patricia` and `perl-Razor-Agent`. Neither has an AL2023 package either (checked directly: not in the base repo, not in SPAL, not in EPEL 9), so `build.sh` passes `--define "rhel 9"` to both `dnf builddep` and `rpmbuild`, which is exactly what `mock`'s own `epel9` config does -- no spec edit needed, just telling the spec's existing conditional that this is an EPEL9-family build, which for this purpose it genuinely is.
 - **Dropping `perl(Mail::DMARC)`** -- `perl-Mail-DMARC` has no AL2023 package anywhere (base, SPAL, or EPEL 9), so its hard `Requires`/`BuildRequires` is stripped from the spec before building. This leaves the optional DMARC authentication plugin absent; the SPF and DKIM plugins, and everything else, are unaffected. The check is conditional on the package still being unavailable, so this self-heals if AL2023 or SPAL ever ships it.
-- **Dropping `%{gpgverify}`** -- this macro comes from `redhat-rpm-config`, which AL2023 doesn't carry at all, so it's undefined here and `%prep` would fail on the literal text. `build.sh` checks whether it's actually defined before stripping the two calls to it, so if a future AL2023 image does carry the macro, the signature checks run instead of being skipped.
+- **Rewriting `%patch N -pX` to `%patchN -pX`** -- rawhide's spec uses RPM 4.20's syntax for numbered patches (a bare number as a separate macro argument). AL2023 ships RPM 4.16.1.3, which doesn't understand that form: it silently applied `Patch0` once for the line as written and then a second time for what it parsed as an empty, argument-less `%patch`, and the build failed on the second, already-applied copy. RPM has supported the number glued directly onto the macro name (`%patch0 -p1`) since long before 4.16, so `build.sh` rewrites all three lines to that form before building.
+- **`--allowerasing gnupg2`** -- not a spec change, but worth calling out: AL2023 ships `gnupg2-minimal` by default, which provides the `gnupg2` capability the spec's `Requires: gnupg2` needs, but not the `gpgv2` binary that `%{gpgverify}` (the macro `%prep` uses to check the upstream tarball's signature) actually shells out to. `--allowerasing` swaps in the full `gnupg2` package for the build container only; it has no effect on the built RPM's own `Requires: gnupg2`, which `gnupg2-minimal` already satisfies on any host that installs it. With that in place, the real signature check runs and passes -- the sources aren't just fetched over HTTPS from Apache and trusted, they're checked against SpamAssassin's own release key.
 
 ### Why not rebuild spamass-milter too
 
