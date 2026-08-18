@@ -24,7 +24,10 @@ DEST=$PWD/out/RPMS
 WORK=${SPAMASSASSIN_BUILD_WORK:-/var/tmp/spamassassin-build}
 TOP=$WORK/rpmbuild
 
-dnf -y install rpm-build 'dnf-command(builddep)' gnupg2 \
+# Not gnupg2: AL2023 ships gnupg2-minimal, which already Provides gnupg2 (and
+# conflicts with the full package), so the spec's own Requires: gnupg2 is
+# satisfied without installing anything extra here.
+dnf -y install rpm-build 'dnf-command(builddep)' \
     findutils tar bzip2 gzip gcc make patch util-linux
 
 # dnf needs root; rpmbuild must not have it.
