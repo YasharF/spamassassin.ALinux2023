@@ -53,7 +53,7 @@ for f in spamassassin.spec KEYS README.RHEL.Fedora redhat_local.cf \
          spamassassin-default.rc spamassassin-official.conf \
          spamassassin-spamc.rc spamassassin.service spamassassin.sysconfig \
          spamassassin-helper.sh; do
-    curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         -o "$TOP/SOURCES/$f" "$DISTGIT/$f"
 done
 mv "$TOP/SOURCES/spamassassin.spec" "$TOP/SPECS/spamassassin.spec"
@@ -65,15 +65,15 @@ if [ "$specver-$specrel" != "$V-$R" ]; then
     exit 1
 fi
 
-curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
+curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
     -o "$TOP/SOURCES/Mail-SpamAssassin-$V.tar.bz2" \
     "$APACHE/Mail-SpamAssassin-$V.tar.bz2"
 rulesrev=$(sed -n '/^Source1:/s/.*\.\(r[0-9]\{1,\}\)\.tgz.*/\1/p' "$TOP/SPECS/spamassassin.spec")
-curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
+curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
     -o "$TOP/SOURCES/Mail-SpamAssassin-rules-$V.$rulesrev.tgz" \
     "$APACHE/Mail-SpamAssassin-rules-$V.$rulesrev.tgz"
 for sig in "Mail-SpamAssassin-$V.tar.bz2.asc" "Mail-SpamAssassin-rules-$V.$rulesrev.tgz.asc"; do
-    curl -fsS --retry 5 --retry-delay 5 --retry-all-errors -o "$TOP/SOURCES/$sig" "$APACHE/$sig"
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$TOP/SOURCES/$sig" "$APACHE/$sig"
 done
 
 # perl(Mail::DMARC) has no package anywhere on AL2023 -- not in the base repo,
