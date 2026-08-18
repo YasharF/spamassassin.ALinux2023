@@ -76,6 +76,15 @@ for sig in "Mail-SpamAssassin-$V.tar.bz2.asc" "Mail-SpamAssassin-rules-$V.$rules
     curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors -o "$TOP/SOURCES/$sig" "$APACHE/$sig"
 done
 
+# rawhide's spec writes "%patch 0 -p1" (a bare patch number as a separate
+# argument), RPM 4.20's syntax. AL2023 ships RPM 4.16.1.3, which doesn't
+# understand that form -- it applies Patch0 once for the line as written,
+# then a second time for what it parses as a bare, argument-less %patch
+# (defaulting back to Patch0), so the build fails on the second, already-
+# applied copy. RPM has supported the number-glued-to-the-macro-name form
+# since long before 4.16, so rewrite to that instead.
+sed -i -E 's/^%patch ([0-9]+) (-p[0-9]+)$/%patch\1 \2/' "$TOP/SPECS/spamassassin.spec"
+
 # perl(Mail::DMARC) has no package anywhere on AL2023 -- not in the base repo,
 # not in SPAL, not in EPEL 9 (checked directly). The DMARC plugin is one of
 # several optional authentication plugins (alongside SPF and DKIM, both of
