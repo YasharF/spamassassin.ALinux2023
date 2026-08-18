@@ -1,0 +1,6 @@
+[spamassassin-al2023]
+name=SpamAssassin for Amazon Linux 2023 (unofficial rebuild)
+baseurl=https://yasharf.github.io/spamassassin.ALinux2023/al2023/$basearch/
+enabled=1
+gpgcheck=0
+metadata_expire=6h
