@@ -52,7 +52,7 @@ for f in spamassassin.spec KEYS README.RHEL.Fedora redhat_local.cf \
          spamassassin-4.0.1-remove_dep_to_digest_sha1.patch \
          spamassassin-default.rc spamassassin-official.conf \
          spamassassin-spamc.rc spamassassin.service spamassassin.sysconfig \
-         spamassassin-helper.sh; do
+         spamassassin.sysconfig.el spamassassin-helper.sh; do
     curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors \
         -o "$TOP/SOURCES/$f" "$DISTGIT/$f"
 done
