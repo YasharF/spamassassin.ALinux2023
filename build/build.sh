@@ -24,11 +24,15 @@ DEST=$PWD/out/RPMS
 WORK=${SPAMASSASSIN_BUILD_WORK:-/var/tmp/spamassassin-build}
 TOP=$WORK/rpmbuild
 
-# Not gnupg2: AL2023 ships gnupg2-minimal, which already Provides gnupg2 (and
-# conflicts with the full package), so the spec's own Requires: gnupg2 is
-# satisfied without installing anything extra here.
 dnf -y install rpm-build 'dnf-command(builddep)' \
     findutils tar bzip2 gzip gcc make patch util-linux
+# AL2023 ships gnupg2-minimal by default, which conflicts with the full
+# gnupg2 package -- but %{gpgverify} (the macro %prep uses to check the
+# upstream tarball signatures) needs gpgv2, which gnupg2-minimal doesn't
+# have. --allowerasing swaps it in for this build container only; it has no
+# effect on the built RPM's own Requires: gnupg2, which gnupg2-minimal
+# already satisfies on any host that installs it.
+dnf -y install --allowerasing gnupg2
 
 # dnf needs root; rpmbuild must not have it.
 id builder >/dev/null 2>&1 || useradd -m builder
@@ -64,20 +68,13 @@ fi
 curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
     -o "$TOP/SOURCES/Mail-SpamAssassin-$V.tar.bz2" \
     "$APACHE/Mail-SpamAssassin-$V.tar.bz2"
-rulesrev=$(sed -n 's/.*Mail-SpamAssassin-rules-%{version}\.\(r[0-9]\{1,\}\)\.tgz.*/\1/p' "$TOP/SPECS/spamassassin.spec")
+rulesrev=$(sed -n '/^Source1:/s/.*\.\(r[0-9]\{1,\}\)\.tgz.*/\1/p' "$TOP/SPECS/spamassassin.spec")
 curl -fsS --retry 5 --retry-delay 5 --retry-all-errors \
     -o "$TOP/SOURCES/Mail-SpamAssassin-rules-$V.$rulesrev.tgz" \
     "$APACHE/Mail-SpamAssassin-rules-$V.$rulesrev.tgz"
 for sig in "Mail-SpamAssassin-$V.tar.bz2.asc" "Mail-SpamAssassin-rules-$V.$rulesrev.tgz.asc"; do
     curl -fsS --retry 5 --retry-delay 5 --retry-all-errors -o "$TOP/SOURCES/$sig" "$APACHE/$sig"
 done
-
-# %{gpgverify} is a redhat-rpm-config macro; AL2023 doesn't carry that package
-# at all, so the macro is undefined here and %prep would fail on the literal
-# text. Where it is defined, leave it in place: it's a real signature check.
-if [ "$(rpm --eval '%{gpgverify}' 2>/dev/null)" = '%{gpgverify}' ]; then
-    sed -i '/^%{gpgverify}/d' "$TOP/SPECS/spamassassin.spec"
-fi
 
 # perl(Mail::DMARC) has no package anywhere on AL2023 -- not in the base repo,
 # not in SPAL, not in EPEL 9 (checked directly). The DMARC plugin is one of
